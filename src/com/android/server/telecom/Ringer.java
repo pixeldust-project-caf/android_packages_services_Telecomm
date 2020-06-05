@@ -285,6 +285,9 @@ public class Ringer {
         mContext.getContentResolver().registerContentObserver(
             Settings.System.getUriFor(Settings.System.RINGTONE_VIBRATION_PATTERN),
             false, mSettingObserver, UserHandle.USER_CURRENT);
+        mContext.getContentResolver().registerContentObserver(
+            Settings.System.getUriFor(Settings.System.CUSTOM_RINGTONE_VIBRATION_PATTERN),
+            false, mSettingObserver, UserHandle.USER_CURRENT);
 
         mIsHapticPlaybackSupportedByDevice =
                 mSystemSettingsUtil.isHapticPlaybackSupported(mContext);
@@ -699,6 +702,46 @@ public class Ringer {
                 case 4:
                     mDefaultVibrationEffect = mVibrationEffectProxy.createWaveform(DA_DZZZ_DA_VIBRATION_PATTERN,
                         SEVEN_ELEMENTS_VIBRATION_AMPLITUDE, REPEAT_SIMPLE_VIBRATION_AT);
+                    break;
+                case 5:
+                    String customVibValue = Settings.System.getStringForUser(
+                            mContext.getContentResolver(),
+                            Settings.System.CUSTOM_RINGTONE_VIBRATION_PATTERN,
+                            UserHandle.USER_CURRENT);
+                    String[] customVib = new String[3];
+                    if (customVibValue != null && !customVibValue.equals("")) {
+                        customVib = customVibValue.split(",", 3);
+                    }
+                    else { // If no value - use default
+                        customVib[0] = "0";
+                        customVib[1] = "800";
+                        customVib[2] = "800";
+                    }
+                    long[] vibPattern;
+                    try {
+                        vibPattern = new long[] {
+                            0, // No delay before starting
+                            Long.parseLong(customVib[0]), // How long to vibrate
+                            400, // Delay
+                            Long.parseLong(customVib[1]), // How long to vibrate
+                            400, // Delay
+                            Long.parseLong(customVib[2]), // How long to vibrate
+                            400, // How long to wait before vibrating again
+                        };
+                    } catch (NumberFormatException e) {
+                        Log.e(this, e, "Corrupt custom vibration pattern setting value, fallback to default");
+                        vibPattern = new long[] {
+                            0, // No delay before starting
+                            0, // How long to vibrate
+                            400, // Delay
+                            800, // How long to vibrate
+                            400, // Delay
+                            800, // How long to vibrate
+                            400, // How long to wait before vibrating again
+                        };
+                    }
+                    mDefaultVibrationEffect = mVibrationEffectProxy.createWaveform(vibPattern,
+                            SEVEN_ELEMENTS_VIBRATION_AMPLITUDE, REPEAT_SIMPLE_VIBRATION_AT);
                     break;
                 default:
                     mDefaultVibrationEffect = mVibrationEffectProxy.createWaveform(SIMPLE_VIBRATION_PATTERN,
