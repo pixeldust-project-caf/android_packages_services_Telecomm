@@ -16,6 +16,8 @@
 
 package com.android.server.telecom;
 
+import static android.provider.CallLog.Calls.MISSED_REASON_NOT_MISSED;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
@@ -33,6 +35,7 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.Trace;
 import android.os.UserHandle;
+import android.provider.CallLog;
 import android.provider.ContactsContract.Contacts;
 import android.telecom.CallAudioState;
 import android.telecom.CallerInfo;
@@ -545,7 +548,7 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
     private ParcelFileDescriptor[] mConnectionServiceToInCallStreams;
 
     /**
-     * True if we're supposed to start this call with RTT, either due to the master switch or due
+     * True if we're supposed to start this call with RTT, either due to the settings switch or due
      * to an extra.
      */
     private boolean mDidRequestToStartWithRtt = false;
@@ -588,7 +591,7 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
 
     /**
      * Indicates whether this call is using one of the
-     * {@link com.android.server.telecom.callfiltering.IncomingCallFilter.CallFilter} modules.
+     * {@link com.android.server.telecom.callfiltering.CallFilter} modules.
      */
     private boolean mIsUsingCallFiltering = false;
 
@@ -609,6 +612,16 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      * of a call.
      */
     private String mPostCallPackageName;
+
+    /**
+     * Call missed information code.
+     */
+    @CallLog.Calls.MissedReason private long mMissedReason;
+
+    /**
+     * Time that this call start ringing or simulated ringing.
+     */
+    private long mStartRingTime;
 
     /**
      * Persists the specified parameters and initializes the new instance.
@@ -692,6 +705,8 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
         mClockProxy = clockProxy;
         mToastFactory = toastFactory;
         mCreationTimeMillis = mClockProxy.currentTimeMillis();
+        mMissedReason = MISSED_REASON_NOT_MISSED;
+        mStartRingTime = 0;
     }
 
     /**
@@ -1123,6 +1138,12 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                     break;
                 case CallState.ANSWERED:
                     event = LogUtils.Events.SET_ANSWERED;
+                    break;
+                case CallState.AUDIO_PROCESSING:
+                    event = LogUtils.Events.SET_AUDIO_PROCESSING;
+                    break;
+                case CallState.SIMULATED_RINGING:
+                    event = LogUtils.Events.SET_SIMULATED_RINGING;
                     break;
             }
             if (event != null) {
@@ -3863,5 +3884,21 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      */
     public String getPostCallPackageName() {
         return mPostCallPackageName;
+    }
+
+    public long getMissedReason() {
+        return mMissedReason;
+    }
+
+    public void setMissedReason(long missedReason) {
+        mMissedReason = missedReason;
+    }
+
+    public long getStartRingTime() {
+        return mStartRingTime;
+    }
+
+    public void setStartRingTime(long startRingTime) {
+        mStartRingTime = startRingTime;
     }
 }

@@ -34,6 +34,7 @@ import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.PermissionChecker;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -824,6 +825,22 @@ public class TelecomServiceImpl {
                 synchronized (mLock) {
                     return mCallsManager.hasOngoingCalls();
                 }
+            } finally {
+                Log.endSession();
+            }
+        }
+
+        /**
+         * @see android.telecom.TelecomManager#hasCompanionInCallServiceAccess
+         */
+        @Override
+        public boolean hasCompanionInCallServiceAccess(String callingPackage) {
+            try {
+                Log.startSession("TSI.hCICSA");
+                return PermissionChecker.checkPermissionForPreflight(mContext,
+                        Manifest.permission.MANAGE_ONGOING_CALLS,
+                                PermissionChecker.PID_UNKNOWN, Binder.getCallingUid(),
+                                        callingPackage) == PermissionChecker.PERMISSION_GRANTED;
             } finally {
                 Log.endSession();
             }
@@ -1747,6 +1764,32 @@ public class TelecomServiceImpl {
                     } finally {
                         Binder.restoreCallingIdentity(token);
                     }
+                }
+            } finally {
+                Log.endSession();
+            }
+        }
+
+        /**
+         * A method intended for use in testing to clean up any calls that get stuck in the
+         * {@link CallState#DISCONNECTED} or {@link CallState#DISCONNECTING} states. Stuck calls
+         * during CTS cause cascading failures, so if the CTS test detects such a state, it should
+         * call this method via a shell command to clean up before moving on to the next test.
+         */
+        @Override
+        public void cleanupStuckCalls() {
+            Log.startSession("TCI.cSC");
+            try {
+                synchronized (mLock) {
+                    enforceShellOnly(Binder.getCallingUid(), "cleanupStuckCalls");
+                    Binder.withCleanCallingIdentity(() -> {
+                        for (Call call : mCallsManager.getCalls()) {
+                            if (call.getState() == CallState.DISCONNECTED
+                                    || call.getState() == CallState.DISCONNECTING) {
+                                mCallsManager.markCallAsRemoved(call);
+                            }
+                        }
+                    });
                 }
             } finally {
                 Log.endSession();
