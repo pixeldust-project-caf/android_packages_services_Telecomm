@@ -75,37 +75,41 @@ public class SystemStateHelper implements UiModeManager.OnProjectionStateChangeL
     private final BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            Log.startSession("SSP.oR");
+            Log.startSession("SSH.oR");
             try {
-                String action = intent.getAction();
-                if (UiModeManager.ACTION_ENTER_CAR_MODE_PRIORITIZED.equals(action)) {
-                    int priority = intent.getIntExtra(UiModeManager.EXTRA_PRIORITY,
-                            UiModeManager.DEFAULT_PRIORITY);
-                    String callingPackage = intent.getStringExtra(
-                            UiModeManager.EXTRA_CALLING_PACKAGE);
-                    Log.i(SystemStateHelper.this, "ENTER_CAR_MODE_PRIORITIZED; priority=%d, pkg=%s",
-                            priority, callingPackage);
-                    onEnterCarMode(priority, callingPackage);
-                } else if (UiModeManager.ACTION_EXIT_CAR_MODE_PRIORITIZED.equals(action)) {
-                    int priority = intent.getIntExtra(UiModeManager.EXTRA_PRIORITY,
-                            UiModeManager.DEFAULT_PRIORITY);
-                    String callingPackage = intent.getStringExtra(
-                            UiModeManager.EXTRA_CALLING_PACKAGE);
-                    Log.i(SystemStateHelper.this, "EXIT_CAR_MODE_PRIORITIZED; priority=%d, pkg=%s",
-                            priority, callingPackage);
-                    onExitCarMode(priority, callingPackage);
-                } else if (Intent.ACTION_PACKAGE_REMOVED.equals(action)) {
-                    Uri data = intent.getData();
-                    if (data == null) {
+                synchronized (mLock) {
+                    String action = intent.getAction();
+                    if (UiModeManager.ACTION_ENTER_CAR_MODE_PRIORITIZED.equals(action)) {
+                        int priority = intent.getIntExtra(UiModeManager.EXTRA_PRIORITY,
+                                UiModeManager.DEFAULT_PRIORITY);
+                        String callingPackage = intent.getStringExtra(
+                                UiModeManager.EXTRA_CALLING_PACKAGE);
+                        Log.i(SystemStateHelper.this,
+                                "ENTER_CAR_MODE_PRIORITIZED; priority=%d, pkg=%s",
+                                priority, callingPackage);
+                        onEnterCarMode(priority, callingPackage);
+                    } else if (UiModeManager.ACTION_EXIT_CAR_MODE_PRIORITIZED.equals(action)) {
+                        int priority = intent.getIntExtra(UiModeManager.EXTRA_PRIORITY,
+                                UiModeManager.DEFAULT_PRIORITY);
+                        String callingPackage = intent.getStringExtra(
+                                UiModeManager.EXTRA_CALLING_PACKAGE);
+                        Log.i(SystemStateHelper.this,
+                                "EXIT_CAR_MODE_PRIORITIZED; priority=%d, pkg=%s",
+                                priority, callingPackage);
+                        onExitCarMode(priority, callingPackage);
+                    } else if (Intent.ACTION_PACKAGE_REMOVED.equals(action)) {
+                        Uri data = intent.getData();
+                        if (data == null) {
+                            Log.w(SystemStateHelper.this,
+                                    "Got null data for package removed, ignoring");
+                            return;
+                        }
+                        mListeners.forEach(
+                                l -> l.onPackageUninstalled(data.getEncodedSchemeSpecificPart()));
+                    } else {
                         Log.w(SystemStateHelper.this,
-                                "Got null data for package removed, ignoring");
-                        return;
+                                "Unexpected intent received: %s", intent.getAction());
                     }
-                    mListeners.forEach(
-                            l -> l.onPackageUninstalled(data.getEncodedSchemeSpecificPart()));
-                } else {
-                    Log.w(SystemStateHelper.this,
-                            "Unexpected intent received: %s", intent.getAction());
                 }
             } finally {
                 Log.endSession();
@@ -116,18 +120,28 @@ public class SystemStateHelper implements UiModeManager.OnProjectionStateChangeL
     @Override
     public void onProjectionStateChanged(int activeProjectionTypes,
             @NonNull Set<String> projectingPackages) {
-        if (projectingPackages.isEmpty()) {
-            onReleaseAutomotiveProjection();
-        } else {
-            onSetAutomotiveProjection(projectingPackages.iterator().next());
+        Log.startSession("SSH.oPSC");
+        try {
+            synchronized (mLock) {
+                if (projectingPackages.isEmpty()) {
+                    onReleaseAutomotiveProjection();
+                } else {
+                    onSetAutomotiveProjection(projectingPackages.iterator().next());
+                }
+            }
+        } finally {
+            Log.endSession();
         }
+
     }
 
     private Set<SystemStateListener> mListeners = new CopyOnWriteArraySet<>();
     private boolean mIsCarModeOrProjectionActive;
+    private final TelecomSystem.SyncRoot mLock;
 
-    public SystemStateHelper(Context context) {
+    public SystemStateHelper(Context context, TelecomSystem.SyncRoot lock) {
         mContext = context;
+        mLock = lock;
 
         IntentFilter intentFilter1 = new IntentFilter(
                 UiModeManager.ACTION_ENTER_CAR_MODE_PRIORITIZED);

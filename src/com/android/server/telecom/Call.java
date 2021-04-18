@@ -37,14 +37,16 @@ import android.os.Trace;
 import android.os.UserHandle;
 import android.provider.CallLog;
 import android.provider.ContactsContract.Contacts;
+import android.telecom.BluetoothCallQualityReport;
 import android.telecom.CallAudioState;
+import android.telecom.CallDiagnosticService;
+import android.telecom.CallDiagnostics;
 import android.telecom.CallerInfo;
 import android.telecom.Conference;
 import android.telecom.Connection;
 import android.telecom.ConnectionService;
 import android.telecom.DisconnectCause;
 import android.telecom.GatewayInfo;
-import android.telecom.InCallService;
 import android.telecom.Log;
 import android.telecom.Logging.EventManager;
 import android.telecom.ParcelableConference;
@@ -55,11 +57,12 @@ import android.telecom.Response;
 import android.telecom.StatusHints;
 import android.telecom.TelecomManager;
 import android.telecom.VideoProfile;
+import android.telephony.CallQuality;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.TelephonyManager;
 import android.telephony.emergency.EmergencyNumber;
+import android.telephony.ims.ImsReasonInfo;
 import android.text.TextUtils;
-import android.util.ArrayMap;
 import android.widget.Toast;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -79,7 +82,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  *  Encapsulates all aspects of a given phone call throughout its lifecycle, starting
@@ -156,6 +161,9 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                                  Bundle extras, boolean isLegacy);
         void onHandoverFailed(Call call, int error);
         void onHandoverComplete(Call call);
+        void onBluetoothCallQualityReport(Call call, BluetoothCallQualityReport report);
+        void onReceivedDeviceToDeviceMessage(Call call, int messageType, int messageValue);
+        void onReceivedCallQualityReport(Call call, CallQuality callQuality);
     }
 
     public abstract static class ListenerBase implements Listener {
@@ -244,6 +252,12 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
         public void onHandoverFailed(Call call, int error) {}
         @Override
         public void onHandoverComplete(Call call) {}
+        @Override
+        public void onBluetoothCallQualityReport(Call call, BluetoothCallQualityReport report) {}
+        @Override
+        public void onReceivedDeviceToDeviceMessage(Call call, int messageType, int messageValue) {}
+        @Override
+        public void onReceivedCallQualityReport(Call call, CallQuality callQuality) {}
     }
 
     private final CallerInfoLookupHelper.OnQueryCompleteListener mCallerInfoQueryListener =
@@ -647,6 +661,29 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
      * silenced, this field will be null.
      */
     private String mCallScreeningComponentName;
+
+    /**
+     * When {@code true} indicates this call originated from a SIM-based {@link PhoneAccount}.
+     * A sim-based {@link PhoneAccount} is one with {@link PhoneAccount#CAPABILITY_SIM_SUBSCRIPTION}
+     * set.
+     */
+    private boolean mIsSimCall;
+
+    /**
+     * Set to {@code true} if we received a valid response ({@code null} or otherwise) from
+     * the {@link CallDiagnostics#onCallDisconnected(ImsReasonInfo)} or
+     * {@link CallDiagnostics#onCallDisconnected(int, int)} calls.  This is used to detect a timeout
+     * when awaiting a response from the call diagnostic service.
+     */
+    private boolean mReceivedCallDiagnosticPostCallResponse = false;
+
+    /**
+     * {@link CompletableFuture} used to delay posting disconnection and removal to a call until
+     * after a {@link CallDiagnosticService} is able to handle the disconnection and provide a
+     * disconnect message via {@link CallDiagnostics#onCallDisconnected(ImsReasonInfo)} or
+     * {@link CallDiagnostics#onCallDisconnected(int, int)}.
+     */
+    private CompletableFuture<Boolean> mDisconnectFuture;
 
     /**
      * Persists the specified parameters and initializes the new instance.
@@ -1076,6 +1113,31 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
             return mConnectionId;
         } else {
             return mConnectionId;
+        }
+    }
+
+    /**
+     * Handles an incoming overridden disconnect message for this call.
+     *
+     * We only care if the disconnect is handled via a future.
+     * @param message the overridden disconnect message.
+     */
+    public void handleOverrideDisconnectMessage(@Nullable CharSequence message) {
+        Log.i(this, "handleOverrideDisconnectMessage; callid=%s, msg=%s", getId(), message);
+
+        if (isDisconnectHandledViaFuture()) {
+            mReceivedCallDiagnosticPostCallResponse = true;
+            if (message != null) {
+                Log.addEvent(this, LogUtils.Events.OVERRIDE_DISCONNECT_MESSAGE, message);
+                // Replace the existing disconnect cause in this call
+                setOverrideDisconnectCauseCode(new DisconnectCause(DisconnectCause.ERROR, message,
+                        message, null));
+            }
+
+            mDisconnectFuture.complete(true);
+        } else {
+            Log.w(this, "handleOverrideDisconnectMessage; callid=%s - got override when unbound",
+                    getId());
         }
     }
 
@@ -1705,6 +1767,7 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
         PhoneAccountRegistrar phoneAccountRegistrar = mCallsManager.getPhoneAccountRegistrar();
         boolean isWorkCall = false;
         boolean isCallRecordingToneSupported = false;
+        boolean isSimCall = false;
         PhoneAccount phoneAccount =
                 phoneAccountRegistrar.getPhoneAccountUnchecked(mTargetPhoneAccountHandle);
         if (phoneAccount != null) {
@@ -1722,9 +1785,11 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                     PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION) && phoneAccount.getExtras() != null
                     && phoneAccount.getExtras().getBoolean(
                     PhoneAccount.EXTRA_PLAY_CALL_RECORDING_TONE, false));
+            isSimCall = phoneAccount.hasCapabilities(PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION);
         }
         mIsWorkCall = isWorkCall;
         mUseCallRecordingTone = isCallRecordingToneSupported;
+        mIsSimCall = isSimCall;
     }
 
     /**
@@ -2967,12 +3032,31 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                 }
                 requestHandover(phoneAccountHandle, videoState, handoverExtrasBundle, true);
             } else {
+                // Relay bluetooth call quality reports to the call diagnostic service.
+                if (BluetoothCallQualityReport.EVENT_BLUETOOTH_CALL_QUALITY_REPORT.equals(event)
+                        && extras.containsKey(
+                        BluetoothCallQualityReport.EXTRA_BLUETOOTH_CALL_QUALITY_REPORT)) {
+                    notifyBluetoothCallQualityReport(extras.getParcelable(
+                            BluetoothCallQualityReport.EXTRA_BLUETOOTH_CALL_QUALITY_REPORT
+                    ));
+                }
                 Log.addEvent(this, LogUtils.Events.CALL_EVENT, event);
                 mConnectionService.sendCallEvent(this, event, extras);
             }
         } else {
             Log.e(this, new NullPointerException(),
                     "sendCallEvent failed due to null CS callId=%s", getId());
+        }
+    }
+
+    /**
+     * Notifies listeners when a bluetooth quality report is received.
+     * @param report The bluetooth quality report.
+     */
+    void notifyBluetoothCallQualityReport(@NonNull BluetoothCallQualityReport report) {
+        Log.addEvent(this, LogUtils.Events.BT_QUALITY_REPORT, "choppy=" + report.isChoppyVoice());
+        for (Listener l : mListeners) {
+            l.onBluetoothCallQualityReport(this, report);
         }
     }
 
@@ -3707,6 +3791,23 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
             for (Listener l : mListeners) {
                 l.onCallSwitchFailed(this);
             }
+        } else if (Connection.EVENT_DEVICE_TO_DEVICE_MESSAGE.equals(event)
+                && extras != null && extras.containsKey(
+                Connection.EXTRA_DEVICE_TO_DEVICE_MESSAGE_TYPE)
+                && extras.containsKey(Connection.EXTRA_DEVICE_TO_DEVICE_MESSAGE_VALUE)) {
+            // Relay an incoming D2D message to interested listeners; most notably the
+            // CallDiagnosticService.
+            int messageType = extras.getInt(Connection.EXTRA_DEVICE_TO_DEVICE_MESSAGE_TYPE);
+            int messageValue = extras.getInt(Connection.EXTRA_DEVICE_TO_DEVICE_MESSAGE_VALUE);
+            for (Listener l : mListeners) {
+                l.onReceivedDeviceToDeviceMessage(this, messageType, messageValue);
+            }
+        } else if (Connection.EVENT_CALL_QUALITY_REPORT.equals(event)
+                && extras != null && extras.containsKey(Connection.EXTRA_CALL_QUALITY_REPORT)) {
+            CallQuality callQuality = extras.getParcelable(Connection.EXTRA_CALL_QUALITY_REPORT);
+            for (Listener l : mListeners) {
+                l.onReceivedCallQualityReport(this, callQuality);
+            }
         } else {
             for (Listener l : mListeners) {
                 l.onConnectionEvent(this, event, extras);
@@ -3912,6 +4013,44 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
     }
 
     /**
+     * Sends a device to device message to the other part of the call.
+     * @param message the message type to send.
+     * @param value the value for the message.
+     */
+    public void sendDeviceToDeviceMessage(@CallDiagnostics.MessageType int message, int value) {
+        Log.i(this, "sendDeviceToDeviceMessage; callId=%s, msg=%d/%d", getId(), message, value);
+        Bundle extras = new Bundle();
+        extras.putInt(Connection.EXTRA_DEVICE_TO_DEVICE_MESSAGE_TYPE, message);
+        extras.putInt(Connection.EXTRA_DEVICE_TO_DEVICE_MESSAGE_VALUE, value);
+        // Send to the connection service.
+        sendCallEvent(Connection.EVENT_DEVICE_TO_DEVICE_MESSAGE, extras);
+    }
+
+    /**
+     * Signals to the Dialer app to start displaying a diagnostic message.
+     * @param messageId a unique ID for the message to display.
+     * @param message the message to display.
+     */
+    public void displayDiagnosticMessage(int messageId, @NonNull CharSequence message) {
+        Bundle extras = new Bundle();
+        extras.putInt(android.telecom.Call.EXTRA_DIAGNOSTIC_MESSAGE_ID, messageId);
+        extras.putCharSequence(android.telecom.Call.EXTRA_DIAGNOSTIC_MESSAGE, message);
+        // Send to the dialer.
+        onConnectionEvent(android.telecom.Call.EVENT_DISPLAY_DIAGNOSTIC_MESSAGE, extras);
+    }
+
+    /**
+     * Signals to the Dialer app to stop displaying a diagnostic message.
+     * @param messageId a unique ID for the message to clear.
+     */
+    public void clearDiagnosticMessage(int messageId) {
+        Bundle extras = new Bundle();
+        extras.putInt(android.telecom.Call.EXTRA_DIAGNOSTIC_MESSAGE_ID, messageId);
+        // Send to the dialer.
+        onConnectionEvent(android.telecom.Call.EVENT_CLEAR_DIAGNOSTIC_MESSAGE, extras);
+    }
+
+    /**
      * Remaps the call direction as indicated by an {@link android.telecom.Call.Details} direction
      * constant to the constants (e.g. {@link #CALL_DIRECTION_INCOMING}) used in this call class.
      * @param direction The android.telecom.Call direction.
@@ -3995,6 +4134,80 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
             } else if (isTracking) {
                 mConnectionService.onTrackedByNonUiService(this, isTracking);
             }
+        }
+    }
+
+    /**
+     * @return {@code true} when this call originated from a SIM-based {@link PhoneAccount}.
+     * A sim-based {@link PhoneAccount} is one with {@link PhoneAccount#CAPABILITY_SIM_SUBSCRIPTION}
+     * set.
+     */
+    public boolean isSimCall() {
+        return mIsSimCall;
+    }
+
+    /**
+     * Sets whether this is a sim call or not.
+     * @param isSimCall {@code true} if this is a SIM call, {@code false} otherwise.
+     */
+    public void setIsSimCall(boolean isSimCall) {
+        mIsSimCall = isSimCall;
+    }
+
+    /**
+     * Initializes a disconnect future which is used to chain up pending operations which take
+     * place when the {@link CallDiagnosticService} returns the result of the
+     * {@link CallDiagnostics#onCallDisconnected(int, int)} or
+     * {@link CallDiagnostics#onCallDisconnected(ImsReasonInfo)} invocation via
+     * {@link CallDiagnosticServiceAdapter}.  If no {@link CallDiagnosticService} is in use, we
+     * would not try to make a disconnect future.
+     * @param timeoutMillis Timeout we use for waiting for the response.
+     * @return the {@link CompletableFuture}.
+     */
+    public CompletableFuture<Boolean> initializeDisconnectFuture(long timeoutMillis) {
+        if (mDisconnectFuture == null) {
+            mDisconnectFuture = new CompletableFuture<Boolean>()
+                    .completeOnTimeout(false, timeoutMillis, TimeUnit.MILLISECONDS);
+            // After all the chained stuff we will report where the CDS timed out.
+            mDisconnectFuture.thenRunAsync(() -> {
+                if (!mReceivedCallDiagnosticPostCallResponse) {
+                    Log.addEvent(this, LogUtils.Events.CALL_DIAGNOSTIC_SERVICE_TIMEOUT);
+                }
+                // Clear the future as a final step.
+                mDisconnectFuture = null;
+                },
+                new LoggedHandlerExecutor(mHandler, "C.iDF", mLock))
+                    .exceptionally((throwable) -> {
+                        Log.e(this, throwable, "Error while executing disconnect future");
+                        return null;
+                    });
+        }
+        return mDisconnectFuture;
+    }
+
+    /**
+     * @return the disconnect future, if initialized.  Used for chaining operations after creation.
+     */
+    public CompletableFuture<Boolean> getDisconnectFuture() {
+        return mDisconnectFuture;
+    }
+
+    /**
+     * @return {@code true} if disconnection and removal is handled via a future, or {@code false}
+     * if this is handled immediately.
+     */
+    public boolean isDisconnectHandledViaFuture() {
+        return mDisconnectFuture != null;
+    }
+
+    /**
+     * Perform any cleanup on this call as a result of a {@link TelecomServiceImpl}
+     * {@code cleanupStuckCalls} request.
+     */
+    public void cleanup() {
+        if (mDisconnectFuture != null) {
+            mDisconnectFuture.complete(false);
+            mDisconnectFuture = null;
         }
     }
 }

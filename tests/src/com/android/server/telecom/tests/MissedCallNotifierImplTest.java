@@ -458,7 +458,7 @@ public class MissedCallNotifierImplTest extends TelecomTestCase {
                         CallLog.Calls.PRESENTATION_ALLOWED, CALL_TIMESTAMP)
                 .build();
 
-        when(cp.query(anyString(), nullable(String.class), eq(queryUri), nullable(String[].class),
+        when(cp.query(any(), eq(queryUri), nullable(String[].class),
                 nullable(Bundle.class), nullable(ICancellationSignal.class)))
                 .thenReturn(mockMissedCallsCursor);
 
@@ -528,7 +528,7 @@ public class MissedCallNotifierImplTest extends TelecomTestCase {
                 PRIMARY_USER.getIdentifier());
         IContentProvider cp = getContentProviderForUser(PRIMARY_USER.getIdentifier());
 
-        when(cp.query(anyString(), nullable(String.class), eq(queryUri), nullable(String[].class),
+        when(cp.query(any(), eq(queryUri), nullable(String[].class),
                 nullable(Bundle.class), nullable(ICancellationSignal.class)))
                 .thenReturn(mockMissedCallsCursor);
 
@@ -611,7 +611,7 @@ public class MissedCallNotifierImplTest extends TelecomTestCase {
         assertNotNull("Not expecting null options bundle", bundleCaptor.getValue());
         BroadcastOptions options = new BroadcastOptions(bundleCaptor.getValue());
         assertTrue("App must have a temporary exemption set.",
-                options.getTemporaryAppWhitelistDuration() > 0);
+                options.getTemporaryAppAllowlistDuration() > 0);
 
         // A notification should never be posted by Telecom
         verify(mNotificationManager, never()).notifyAsUser(nullable(String.class), anyInt(),

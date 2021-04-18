@@ -31,6 +31,7 @@ import android.Manifest;
 import android.app.ActivityManager;
 import android.app.AppOpsManager;
 import android.app.UiModeManager;
+import android.app.compat.CompatChanges;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -832,12 +833,12 @@ public class TelecomServiceImpl {
         }
 
         /**
-         * @see android.telecom.TelecomManager#hasCompanionInCallServiceAccess
+         * @see android.telecom.TelecomManager#hasManageOngoingCallsPermission
          */
         @Override
-        public boolean hasCompanionInCallServiceAccess(String callingPackage) {
+        public boolean hasManageOngoingCallsPermission(String callingPackage) {
             try {
-                Log.startSession("TSI.hCICSA");
+                Log.startSession("TSI.hMOCP");
                 return PermissionChecker.checkPermissionForPreflight(mContext,
                         Manifest.permission.MANAGE_ONGOING_CALLS,
                                 PermissionChecker.PID_UNKNOWN, Binder.getCallingUid(),
@@ -898,12 +899,46 @@ public class TelecomServiceImpl {
         }
 
         /**
-         * @see TelecomManager#getCallState
+         * @see TelecomManager#getCallState()
+         * @deprecated this is only being kept due to an @UnsupportedAppUsage tag. Apps targeting
+         * API 31+ must use {@link #getCallStateUsingPackage(String, String)} below.
          */
+        @Deprecated
         @Override
         public int getCallState() {
             try {
-                Log.startSession("TSI.getCallState");
+                Log.startSession("TSI.getCallState(DEPRECATED)");
+                if (CompatChanges.isChangeEnabled(
+                        TelecomManager.ENABLE_GET_CALL_STATE_PERMISSION_PROTECTION,
+                        Binder.getCallingUid())) {
+                    // Do not allow this API to be called on API version 31+, it should only be
+                    // called on old apps using this Binder call directly.
+                    throw new SecurityException("This method can only be used for applications "
+                            + "targeting API version 30 or less.");
+                }
+                synchronized (mLock) {
+                    return mCallsManager.getCallState();
+                }
+            } finally {
+                Log.endSession();
+            }
+        }
+
+        /**
+         * @see TelecomManager#getCallState()
+         */
+        @Override
+        public int getCallStateUsingPackage(String callingPackage, String callingFeatureId) {
+            try {
+                Log.startSession("TSI.getCallStateUsingPackage");
+                if (CompatChanges.isChangeEnabled(
+                        TelecomManager.ENABLE_GET_CALL_STATE_PERMISSION_PROTECTION, callingPackage,
+                        Binder.getCallingUserHandle())) {
+                    if (!canReadPhoneState(callingPackage, callingFeatureId, "getCallState")) {
+                        throw new SecurityException("getCallState API requires READ_PHONE_STATE"
+                                + " for API version 31+");
+                    }
+                }
                 synchronized (mLock) {
                     return mCallsManager.getCallState();
                 }
@@ -1776,6 +1811,8 @@ public class TelecomServiceImpl {
          * {@link CallState#DISCONNECTED} or {@link CallState#DISCONNECTING} states. Stuck calls
          * during CTS cause cascading failures, so if the CTS test detects such a state, it should
          * call this method via a shell command to clean up before moving on to the next test.
+         * Also cleans up any pending futures related to
+         * {@link android.telecom.CallDiagnosticService}s.
          */
         @Override
         public void cleanupStuckCalls() {
@@ -1785,11 +1822,13 @@ public class TelecomServiceImpl {
                     enforceShellOnly(Binder.getCallingUid(), "cleanupStuckCalls");
                     Binder.withCleanCallingIdentity(() -> {
                         for (Call call : mCallsManager.getCalls()) {
+                            call.cleanup();
                             if (call.getState() == CallState.DISCONNECTED
                                     || call.getState() == CallState.DISCONNECTING) {
                                 mCallsManager.markCallAsRemoved(call);
                             }
                         }
+                        mCallsManager.getInCallController().unbindFromServices();
                     });
                 }
             } finally {
@@ -1913,6 +1952,30 @@ public class TelecomServiceImpl {
                     long token = Binder.clearCallingIdentity();
                     try {
                         mCallsManager.getRoleManagerAdapter().setTestDefaultDialer(packageName);
+                    } finally {
+                        Binder.restoreCallingIdentity(token);
+                    }
+                }
+            } finally {
+                Log.endSession();
+            }
+        }
+
+        @Override
+        public void setTestCallDiagnosticService(String packageName) {
+            try {
+                Log.startSession("TSI.sTCDS");
+                enforceModifyPermission();
+                enforceShellOnly(Binder.getCallingUid(), "setTestCallDiagnosticService is for "
+                        + "shell use only.");
+                synchronized (mLock) {
+                    long token = Binder.clearCallingIdentity();
+                    try {
+                        CallDiagnosticServiceController controller =
+                                mCallsManager.getCallDiagnosticServiceController();
+                        if (controller != null) {
+                            controller.setTestCallDiagnosticService(packageName);
+                        }
                     } finally {
                         Binder.restoreCallingIdentity(token);
                     }
