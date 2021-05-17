@@ -32,6 +32,7 @@ import android.app.ActivityManager;
 import android.app.AppOpsManager;
 import android.app.UiModeManager;
 import android.app.compat.CompatChanges;
+import android.content.AttributionSource;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -839,10 +840,14 @@ public class TelecomServiceImpl {
         public boolean hasManageOngoingCallsPermission(String callingPackage) {
             try {
                 Log.startSession("TSI.hMOCP");
-                return PermissionChecker.checkPermissionForPreflight(mContext,
-                        Manifest.permission.MANAGE_ONGOING_CALLS,
-                                PermissionChecker.PID_UNKNOWN, Binder.getCallingUid(),
-                                        callingPackage) == PermissionChecker.PERMISSION_GRANTED;
+                return PermissionChecker.checkPermissionForDataDeliveryFromDataSource(
+                        mContext, Manifest.permission.MANAGE_ONGOING_CALLS,
+                        Binder.getCallingPid(),
+                        new AttributionSource(mContext.getAttributionSource(),
+                                new AttributionSource(Binder.getCallingUid(),
+                                        callingPackage, /*attributionTag*/ null)),
+                        "Checking whether the caller has MANAGE_ONGOING_CALLS permission")
+                                == PermissionChecker.PERMISSION_GRANTED;
             } finally {
                 Log.endSession();
             }
@@ -934,7 +939,9 @@ public class TelecomServiceImpl {
                 if (CompatChanges.isChangeEnabled(
                         TelecomManager.ENABLE_GET_CALL_STATE_PERMISSION_PROTECTION, callingPackage,
                         Binder.getCallingUserHandle())) {
-                    if (!canReadPhoneState(callingPackage, callingFeatureId, "getCallState")) {
+                    // Bypass canReadPhoneState check if this is being called from SHELL UID
+                    if (Binder.getCallingUid() != Process.SHELL_UID && !canReadPhoneState(
+                            callingPackage, callingFeatureId, "getCallState")) {
                         throw new SecurityException("getCallState API requires READ_PHONE_STATE"
                                 + " for API version 31+");
                     }
