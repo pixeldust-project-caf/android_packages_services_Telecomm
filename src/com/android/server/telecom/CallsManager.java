@@ -1329,8 +1329,8 @@ public class CallsManager extends Call.ListenerBase
             if (call.isSelfManaged()) {
                 // Self managed calls will always be voip audio mode.
                 call.setIsVoipAudioMode(true);
-                call.setVisibleToInCallService(phoneAccountExtras == null
-                        || phoneAccountExtras.getBoolean(
+                call.setVisibleToInCallService(phoneAccountExtras != null
+                        && phoneAccountExtras.getBoolean(
                         PhoneAccount.EXTRA_ADD_SELF_MANAGED_CALLS_TO_INCALLSERVICE, true));
             } else {
                 // Incoming call is managed, the active call is self-managed and can't be held.
@@ -1595,8 +1595,8 @@ public class CallsManager extends Call.ListenerBase
             if (isSelfManaged) {
                 // Self-managed calls will ALWAYS use voip audio mode.
                 call.setIsVoipAudioMode(true);
-                call.setVisibleToInCallService(phoneAccountExtra == null
-                        || phoneAccountExtra.getBoolean(
+                call.setVisibleToInCallService(phoneAccountExtra != null
+                        && phoneAccountExtra.getBoolean(
                                 PhoneAccount.EXTRA_ADD_SELF_MANAGED_CALLS_TO_INCALLSERVICE, true));
             }
             call.setInitiatingUser(initiatingUser);
@@ -1714,21 +1714,6 @@ public class CallsManager extends Call.ListenerBase
                             markCallAsDisconnected(reusableCall,
                                     new DisconnectCause(DisconnectCause.CANCELED));
                         }
-                    }
-
-                    if (!finalCall.isEmergencyCall() && isInEmergencyCall()) {
-                        Log.i(CallsManager.this, "Aborting call since there's an"
-                                + " ongoing emergency call");
-                        // If the ongoing call is a managed call, we will prevent the outgoing
-                        // call from dialing.
-                        if (isConference) {
-                            notifyCreateConferenceFailed(finalCall.getTargetPhoneAccount(),
-                                    finalCall);
-                        } else {
-                            notifyCreateConnectionFailed(
-                                    finalCall.getTargetPhoneAccount(), finalCall);
-                        }
-                        return CompletableFuture.completedFuture(null);
                     }
 
                     // If we can not supportany more active calls, our options are to move a call
@@ -2126,8 +2111,6 @@ public class CallsManager extends Call.ListenerBase
                             handle.getSchemeSpecificPart());
         } catch (IllegalStateException ise) {
             isPotentialEmergencyNumber = false;
-        } catch (RuntimeException r) {
-            isPotentialEmergencyNumber = false;
         }
 
         if (shouldCancelCall) {
@@ -2305,16 +2288,8 @@ public class CallsManager extends Call.ListenerBase
     public void processRedirectedOutgoingCallAfterUserInteraction(String callId, String action) {
         Log.i(this, "processRedirectedOutgoingCallAfterUserInteraction for Call ID %s, action=%s",
                 callId, action);
-        if (mPendingRedirectedOutgoingCall != null) {
-            String pendingCallId = mPendingRedirectedOutgoingCall.getId();
-            if (!pendingCallId.equals(callId)) {
-                Log.i(this, "processRedirectedOutgoingCallAfterUserInteraction for new Call ID %s, "
-                        + "cancel the previous pending Call with ID %s", callId, pendingCallId);
-                mPendingRedirectedOutgoingCall.disconnect("Another call redirection requested");
-                mPendingRedirectedOutgoingCallInfo.remove(pendingCallId);
-                mPendingUnredirectedOutgoingCallInfo.remove(pendingCallId);
-            }
-
+        if (mPendingRedirectedOutgoingCall != null && mPendingRedirectedOutgoingCall.getId()
+                .equals(callId)) {
             if (action.equals(TelecomBroadcastIntentProcessor.ACTION_PLACE_REDIRECTED_CALL)) {
                 mHandler.post(mPendingRedirectedOutgoingCallInfo.get(callId).prepare());
             } else if (action.equals(
@@ -4390,8 +4365,7 @@ public class CallsManager extends Call.ListenerBase
         return false;
     }
 
-    @VisibleForTesting
-    public boolean makeRoomForOutgoingCall(Call call) {
+    private boolean makeRoomForOutgoingCall(Call call) {
         // Already room!
         if (!hasMaximumLiveCalls(call)) return true;
 
@@ -4405,13 +4379,6 @@ public class CallsManager extends Call.ListenerBase
             // If the call is already the foreground call, then we are golden.
             // This can happen after the user selects an account in the SELECT_PHONE_ACCOUNT
             // state since the call was already populated into the list.
-            return true;
-        }
-
-        // If the live call is stuck in a connecting state, then we should disconnect it in favor
-        // of the new outgoing call.
-        if (liveCall.getState() == CallState.CONNECTING) {
-            liveCall.disconnect("Force disconnect CONNECTING call.");
             return true;
         }
 
@@ -5666,11 +5633,5 @@ public class CallsManager extends Call.ListenerBase
     @VisibleForTesting
     public void addToPendingCallsToDisconnect(Call call) {
         mPendingCallsToDisconnect.add(call);
-    }
-
-    @VisibleForTesting
-    public void addConnectionServiceRepositoryCache(ComponentName componentName,
-            UserHandle userHandle, ConnectionServiceWrapper service) {
-        mConnectionServiceRepository.setService(componentName, userHandle, service);
     }
 }

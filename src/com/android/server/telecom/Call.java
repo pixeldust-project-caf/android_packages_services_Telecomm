@@ -1372,9 +1372,6 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                 } catch (IllegalStateException ise) {
                     Log.e(this, ise, "setHandle: can't determine if number is emergency");
                     mIsEmergencyCall = false;
-                } catch (RuntimeException r) {
-                    Log.e(this, r, "setHandle: can't determine if number is emergency");
-                    mIsEmergencyCall = false;
                 }
                 mAnalytics.setCallIsEmergency(mIsEmergencyCall);
             }
@@ -1398,8 +1395,6 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
                             eNumber.isFromSources(EmergencyNumber.EMERGENCY_NUMBER_SOURCE_TEST) &&
                                     number.equals(eNumber.getNumber()));
         } catch (IllegalStateException ise) {
-            return false;
-        } catch (RuntimeException r) {
             return false;
         }
     }

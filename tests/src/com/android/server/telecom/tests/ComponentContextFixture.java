@@ -33,7 +33,6 @@ import android.app.StatusBarManager;
 import android.app.UiModeManager;
 import android.app.role.RoleManager;
 import android.content.AttributionSource;
-import android.content.AttributionSourceState;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.ContentResolver;
@@ -62,7 +61,6 @@ import android.os.Process;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.os.VibratorManager;
-import android.permission.PermissionCheckerManager;
 import android.telecom.CallAudioState;
 import android.telecom.ConnectionService;
 import android.telecom.Log;
@@ -86,9 +84,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Executor;
 
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.matches;
-import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
@@ -219,8 +215,6 @@ public class ComponentContextFixture implements TestFixture<Context> {
                     return mUiModeManager;
                 case Context.VIBRATOR_MANAGER_SERVICE:
                     return mVibratorManager;
-                case Context.PERMISSION_CHECKER_SERVICE:
-                    return mPermissionCheckerManager;
                 default:
                     return null;
             }
@@ -246,8 +240,6 @@ public class ComponentContextFixture implements TestFixture<Context> {
                 return Context.UI_MODE_SERVICE;
             } else if (svcClass == VibratorManager.class) {
                 return Context.VIBRATOR_MANAGER_SERVICE;
-            } else if (svcClass == PermissionCheckerManager.class) {
-                return Context.PERMISSION_CHECKER_SERVICE;
             }
             throw new UnsupportedOperationException();
         }
@@ -524,8 +516,6 @@ public class ComponentContextFixture implements TestFixture<Context> {
             mock(TelephonyRegistryManager.class);
     private final VibratorManager mVibratorManager = mock(VibratorManager.class);
     private final UiModeManager mUiModeManager = mock(UiModeManager.class);
-    private final PermissionCheckerManager mPermissionCheckerManager =
-            mock(PermissionCheckerManager.class);
     private final PermissionInfo mPermissionInfo = mock(PermissionInfo.class);
 
     private TelecomManager mTelecomManager = mock(TelecomManager.class);
@@ -580,10 +570,9 @@ public class ComponentContextFixture implements TestFixture<Context> {
         }).when(mPackageManager).queryBroadcastReceiversAsUser((Intent) any(), anyInt(), anyInt());
 
         // By default, tests use non-ui apps instead of 3rd party companion apps.
-        when(mPermissionCheckerManager.checkPermission(
-                matches(Manifest.permission.CALL_COMPANION_APP), any(AttributionSourceState.class),
-                nullable(String.class), anyBoolean(), anyBoolean(), anyBoolean(), anyInt()))
-                .thenReturn(PermissionCheckerManager.PERMISSION_HARD_DENIED);
+        when(mPackageManager.checkPermission(
+                matches(Manifest.permission.CALL_COMPANION_APP), anyString()))
+                .thenReturn(PackageManager.PERMISSION_DENIED);
 
         try {
             when(mPackageManager.getPermissionInfo(anyString(), anyInt())).thenReturn(
@@ -660,15 +649,11 @@ public class ComponentContextFixture implements TestFixture<Context> {
         serviceInfo.name = componentName.getClassName();
         mServiceInfoByComponentName.put(componentName, serviceInfo);
 
-        // Used in InCallController to check permissions for CONTROL_INCALL_fvEXPERIENCE
+        // Used in InCallController to check permissions for CONTROL_INCALL_EXPERIENCE
         when(mPackageManager.getPackagesForUid(eq(uid))).thenReturn(new String[] {
                 componentName.getPackageName() });
         when(mPackageManager.checkPermission(eq(Manifest.permission.CONTROL_INCALL_EXPERIENCE),
                 eq(componentName.getPackageName()))).thenReturn(PackageManager.PERMISSION_GRANTED);
-        when(mPermissionCheckerManager.checkPermission(
-                eq(Manifest.permission.CONTROL_INCALL_EXPERIENCE),
-                any(AttributionSourceState.class), anyString(), anyBoolean(), anyBoolean(),
-                anyBoolean(), anyInt())).thenReturn(PackageManager.PERMISSION_GRANTED);
     }
 
     public void addIntentReceiver(String action, ComponentName name) {
