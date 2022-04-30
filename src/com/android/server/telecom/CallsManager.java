@@ -2613,6 +2613,14 @@ public class CallsManager extends Call.ListenerBase
             || mBluetoothRouteManager.isBluetoothAvailable();
      }
 
+     public boolean isWiredHandsetIn() {
+        return mWiredHeadsetManager.isPluggedIn();
+     }
+
+     public boolean isBtAvailble() {
+       return  mBluetoothRouteManager.isBluetoothAvailable();
+     }
+
     /**
      * Determines if the speakerphone should be enabled for when docked.  Speakerphone
      * should be enabled if the device is docked and bluetooth or the wired headset are
