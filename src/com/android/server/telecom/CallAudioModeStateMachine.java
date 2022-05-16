@@ -16,6 +16,7 @@
 
 package com.android.server.telecom;
 
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.os.Looper;
 import android.os.Message;
@@ -28,6 +29,8 @@ import com.android.internal.util.IState;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
+
+import java.util.concurrent.Executors;
 
 public class CallAudioModeStateMachine extends StateMachine {
     public static class Factory {
@@ -373,6 +376,22 @@ public class CallAudioModeStateMachine extends StateMachine {
         // Keeps track of whether we're ringing with audio focus or if we've just entered the state
         // without acquiring focus because of a silent ringtone or something.
         private boolean mHasFocus = false;
+        private CommunicationDeviceChangedListener mCommunicationDeviceChangedListener = null;
+        class CommunicationDeviceChangedListener implements
+                AudioManager.OnCommunicationDeviceChangedListener {
+            @Override
+            public void onCommunicationDeviceChanged(AudioDeviceInfo device) {
+                if (device == null) {
+                    return;
+                }
+                Log.i(this,"onCommunicationDeviceChanged, Device type is: "
+                        + device.getInternalType());
+                if (device.getInternalType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                    mAudioManager.setMode(AudioManager.MODE_IN_CALL);
+                }
+            }
+        }
+
         private void tryStartRinging() {
             if (mHasFocus) {
                 Log.i(LOG_TAG, "CrsFocusState#tryStartRinging -- audio focus previously acquired.");
@@ -383,7 +402,19 @@ public class CallAudioModeStateMachine extends StateMachine {
                 Log.i(LOG_TAG, "RINGING state, try start video CRS");
                 mAudioManager.requestAudioFocusForCall(AudioManager.STREAM_VOICE_CALL,
                         AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
-                mAudioManager.setMode(AudioManager.MODE_IN_CALL);
+                if (mAudioManager.isSpeakerphoneOn()) {
+                    mAudioManager.setMode(AudioManager.MODE_IN_CALL);
+                } else {
+                    mCommunicationDeviceChangedListener = new CommunicationDeviceChangedListener();
+                    try {
+                        mAudioManager.addOnCommunicationDeviceChangedListener(
+                                mCallAudioManager.getContext().getMainExecutor(),
+                                mCommunicationDeviceChangedListener);
+                    } catch (Exception e) {
+                        Log.i(this, "addOnCommunicationDeviceChangedListener"
+                                + "failed with exception: " + e);
+                    }
+                }
                 mCallAudioManager.setCallAudioRouteFocusState(
                         CallAudioRouteStateMachine.ACTIVE_FOCUS);
                 mHasFocus = true;
@@ -412,6 +443,16 @@ public class CallAudioModeStateMachine extends StateMachine {
         @Override
         public void exit() {
             // Audio mode and audio stream will be set by the next state.
+            if (mCommunicationDeviceChangedListener != null) {
+                try {
+                    mAudioManager.removeOnCommunicationDeviceChangedListener(
+                            mCommunicationDeviceChangedListener);
+                } catch (Exception e) {
+                    Log.i(this, "removeOnCommunicationDeviceChangedListener"
+                            + "failed with exception: " + e);
+                }
+                mCommunicationDeviceChangedListener = null;
+            }
             mCallAudioManager.stopPlayingCrs();
             mHasFocus = false;
         }
