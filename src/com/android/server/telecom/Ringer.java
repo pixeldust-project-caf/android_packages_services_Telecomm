@@ -113,6 +113,14 @@ public class Ringer {
         1000, // How long to wait before vibrating again
     };
 
+    private static final int[] SIMPLE_VIBRATION_AMPLITUDE = {
+        0, // No delay before starting
+        255, // Vibrate full amplitude
+        0, // No amplitude while waiting
+        255, // Vibrate full amplitude
+        0, // No amplitude while waiting
+    };
+
     private static final long[] DZZZ_DA_VIBRATION_PATTERN = {
         0, // No delay before starting
         500, // How long to vibrate
@@ -167,12 +175,6 @@ public class Ringer {
         0, // No amplitude while waiting
         255,
         0,
-    };
-
-    private static final int[] SIMPLE_VIBRATION_AMPLITUDE = {
-        0, // No delay before starting
-        255, // Vibrate full amplitude
-        0, // No amplitude while waiting
     };
 
     private final boolean mUseSimplePattern;
