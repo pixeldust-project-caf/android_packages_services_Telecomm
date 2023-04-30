@@ -19,6 +19,7 @@ package com.android.server.telecom;
 import android.content.ComponentName;
 import android.content.Context;
 import android.net.Uri;
+import android.telecom.Log;
 import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
 import android.telephony.PhoneNumberUtils;
@@ -40,6 +41,8 @@ public final class TelephonyUtil {
 
     private static final String PSTN_CALL_SERVICE_CLASS_NAME =
             "com.android.services.telephony.TelephonyConnectionService";
+
+    private static final String LOG_TAG = "TelephonyUtil";
 
     private static final PhoneAccountHandle DEFAULT_EMERGENCY_PHONE_ACCOUNT_HANDLE =
             new PhoneAccountHandle(

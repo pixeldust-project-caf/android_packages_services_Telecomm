@@ -166,6 +166,12 @@ public final class CallLogManager extends CallsManagerListenerBase {
         if (oldState == CallState.SELECT_PHONE_ACCOUNT) {
             return false;
         }
+
+        //Not log participant host
+        if (call.hasProperty(Connection.PROPERTY_IS_PARTICIPANT_HOST)) {
+            return false;
+        }
+
         // A conference call which had children should not be logged, unless it was remotely hosted.
         if (call.isConference() && call.hadChildren() &&
                 !call.hasProperty(Connection.PROPERTY_REMOTELY_HOSTED)) {
@@ -267,16 +273,9 @@ public final class CallLogManager extends CallsManagerListenerBase {
 
         CallLog.AddCallParams.AddCallParametersBuilder paramBuilder =
                 new CallLog.AddCallParams.AddCallParametersBuilder();
-        if (call.getConnectTimeMillis() != 0
-                && call.getConnectTimeMillis() < call.getCreationTimeMillis()) {
-            // If connected time is available, use connected time. The connected time might be
-            // earlier than created time since it might come from carrier sent special SMS to
-            // notifier user earlier missed call.
-            paramBuilder.setStart(call.getConnectTimeMillis());
-        } else {
-            paramBuilder.setStart(call.getCreationTimeMillis());
-        }
 
+        paramBuilder.setStart(call.isChildCall() ? call.getConnectTimeMillis()
+            : call.getCreationTimeMillis());
         paramBuilder.setDuration((int) (call.getAgeMillis() / 1000));
 
         String logNumber = getLogNumber(call);

@@ -19,12 +19,18 @@ package com.android.server.telecom;
 import static android.provider.CallLog.Calls.USER_MISSED_DND_MODE;
 import static android.provider.CallLog.Calls.USER_MISSED_LOW_RING_VOLUME;
 import static android.provider.CallLog.Calls.USER_MISSED_NO_VIBRATE;
+import static android.provider.Settings.Global.ZEN_MODE_OFF;
 
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.Person;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.database.ContentObserver;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.Ringtone;
 import android.media.VolumeShaper;
@@ -46,6 +52,7 @@ import com.android.server.telecom.LogUtils.EventTimer;
 import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -88,6 +95,8 @@ public class Ringer {
 
     private static final int RAMPING_RINGER_VIBRATION_DURATION = 5000;
     private static final int RAMPING_RINGER_DURATION = 10000;
+
+    private static final int OUTGOING_CALL_VIBRATING_DURATION = 100;
 
     static {
         // construct complete pulse pattern
@@ -234,9 +243,11 @@ public class Ringer {
     /**
      * Used to track the status of {@link #mVibrator} in the case of simultaneous incoming calls.
      */
-    private boolean mIsVibrating = false;
+    private volatile boolean mIsVibrating = false;
 
     private Handler mHandler = null;
+    private int mSavedSpeakerInCallVolume = -1;
+    private CommunicationDeviceChangedListener mCommunicationDeviceChangedListener = null;
 
     /**
      * Use lock different from the Telecom sync because ringing process is asynchronous outside that
@@ -268,6 +279,7 @@ public class Ringer {
         mInCallController = inCallController;
         mVibrationEffectProxy = vibrationEffectProxy;
         mUseSimplePattern = mContext.getResources().getBoolean(R.bool.use_simple_vibration_pattern);
+        mAudioManager = mContext.getSystemService(AudioManager.class);
 
         updateVibrationPattern();
 
@@ -286,6 +298,210 @@ public class Ringer {
     @VisibleForTesting
     public void setBlockOnRingingFuture(CompletableFuture<Void> future) {
         mBlockOnRingingFuture = future;
+    }
+
+    public boolean startPlayingCrs(Call foregroundCall, boolean isHfpDeviceAttached) {
+        if (foregroundCall == null) {
+            Log.wtf(this, "startPlayingCrs called with null foreground call.");
+            return false;
+        }
+
+        boolean isCrsCall = foregroundCall.isCrsCall();
+        Log.i(this, "startPlayingCrs called with video CRS is :: " + isCrsCall);
+        if (!isCrsCall) {
+            return false;
+        }
+
+        if (foregroundCall.getState() != CallState.RINGING
+                && foregroundCall.getState() != CallState.SIMULATED_RINGING) {
+            // Its possible for bluetooth to connect JUST as a call goes active, which would mean
+            // the call would start ringing again.
+            Log.i(this, "startRinging called for non-ringing foreground callid=%s",
+                    foregroundCall.getId());
+            return false;
+        }
+
+        LogUtils.EventTimer timer = new EventTimer();
+        boolean isVolumeOverZero = mAudioManager.getStreamVolume(AudioManager.STREAM_RING) > 0;
+        timer.record("isVolumeOverZero");
+        boolean shouldRingForContact = shouldRingForContact(foregroundCall.getContactUri());
+        timer.record("shouldRingForContact");
+        boolean isSelfManaged = foregroundCall.isSelfManaged();
+        timer.record("isSelfManaged");
+        boolean isSilentRingingRequested = foregroundCall.isSilentRingingRequested();
+        timer.record("isSilentRingRequested");
+
+        boolean isRingerAudible = isVolumeOverZero && shouldRingForContact && isCrsCall;
+        timer.record("isRingerAudible");
+        boolean hasExternalRinger = hasExternalRinger(foregroundCall);
+        timer.record("hasExternalRinger");
+        // Don't do call waiting operations or vibration unless these are false.
+        boolean isTheaterModeOn = mSystemSettingsUtil.isTheaterModeOn(mContext);
+        timer.record("isTheaterModeOn");
+        boolean letDialerHandleRinging = mInCallController.doesConnectedDialerSupportRinging();
+        timer.record("letDialerHandleRinging");
+
+        Log.i(this, "startRinging timings: " + timer);
+        boolean endEarly = isTheaterModeOn || letDialerHandleRinging || isSelfManaged ||
+                hasExternalRinger || isSilentRingingRequested;
+
+        // Acquire audio focus under any of the following conditions:
+        // 1. Should ring for contact and there's an HFP device attached
+        // 2. Volume is over zero, we should ring for the contact, and there's a audible ringtone
+        //    present, here is CRS from network.
+        // 3. The call is self-managed.
+        boolean shouldAcquireAudioFocus =
+                isRingerAudible || (isHfpDeviceAttached && shouldRingForContact) || isSelfManaged;
+
+        if (endEarly) {
+            if (letDialerHandleRinging) {
+                Log.addEvent(foregroundCall, LogUtils.Events.SKIP_RINGING, "Dialer handles");
+            }
+            if (isSilentRingingRequested) {
+                Log.addEvent(foregroundCall, LogUtils.Events.SKIP_RINGING, "Silent ringing "
+                        + "requested");
+            }
+            Log.i(this, "Ending early -- isTheaterModeOn=%s, letDialerHandleRinging=%s, " +
+                            "isSelfManaged=%s, hasExternalRinger=%s, silentRingingRequested=%s",
+                    isTheaterModeOn, letDialerHandleRinging, isSelfManaged, hasExternalRinger,
+                    isSilentRingingRequested);
+            if (mBlockOnRingingFuture != null) {
+                mBlockOnRingingFuture.complete(null);
+            }
+            return shouldAcquireAudioFocus;
+        }
+
+        stopCallWaiting();
+        VibrationEffect effect;
+        // Determine if the settings and DND mode indicate that the vibrator can be used right now.
+        boolean isVibratorEnabled = isVibratorEnabled(mContext, isRingerAudible);
+        if (isRingerAudible) {
+            mRingingCall = foregroundCall;
+            Log.addEvent(foregroundCall, LogUtils.Events.START_RINGER);
+            // Because we wait until a contact info query to complete before processing a
+            // call (for the purposes of direct-to-voicemail), the information about custom
+            // ringtones should be available by the time this code executes. We can safely
+            // request the custom ringtone from the call and expect it to be current.
+            boolean shouldApplyRampingRinger =
+                    isVibratorEnabled && mSystemSettingsUtil.isRampingRingerEnabled(mContext);
+            if (shouldApplyRampingRinger) {
+                Log.i(this, "start ramping ringer.");
+                if (mSystemSettingsUtil.isAudioCoupledVibrationForRampingRingerEnabled()) {
+                    effect = getVibrationEffectForCall(mRingtoneFactory, foregroundCall);
+                } else {
+                    effect = mDefaultVibrationEffect;
+                }
+            } else {
+                effect = getVibrationEffectForCall(mRingtoneFactory, foregroundCall);
+            }
+        } else {
+            String reason = String.format(
+                    "isVolumeOverZero=%s, shouldRingForContact=%s, isCrsCall=%s",
+                    isVolumeOverZero, shouldRingForContact, isCrsCall);
+            Log.i(this, "startRinging: skipping because ringer would not be audible. " + reason);
+            Log.addEvent(foregroundCall, LogUtils.Events.SKIP_RINGING, "Inaudible: " + reason);
+            effect = mDefaultVibrationEffect;
+        }
+
+        Log.i(this, "isHfpDeviceAttached=%s, isVibratorEnabled=%s, isRingerAudible=%s, ",
+                isHfpDeviceAttached, isVibratorEnabled, isRingerAudible);
+        if (isRingerAudible) {
+            if (!mAudioManager.isSpeakerphoneOn()) {
+                mCommunicationDeviceChangedListener = new CommunicationDeviceChangedListener();
+                try {
+                    mAudioManager.addOnCommunicationDeviceChangedListener(
+                            mContext.getMainExecutor(), mCommunicationDeviceChangedListener);
+                } catch (Exception e) {
+                    Log.i(this, "addOnCommunicationDeviceChangedListener failed with exception: "
+                            + e);
+                }
+            } else {
+                Log.i(this,"Speaker is ON for CRS.");
+                setSystemSystemSpeakerInCallVolume();
+            }
+        }
+        if (mBlockOnRingingFuture != null) {
+            mBlockOnRingingFuture.complete(null);
+        }
+        maybeStartVibration(foregroundCall, shouldRingForContact,
+                effect, isVibratorEnabled, isRingerAudible);
+
+        return shouldAcquireAudioFocus;
+    }
+
+    class CommunicationDeviceChangedListener implements
+        AudioManager.OnCommunicationDeviceChangedListener {
+            @Override
+            public void onCommunicationDeviceChanged(AudioDeviceInfo device) {
+                if (device == null) {
+                    return;
+                }
+                Log.i(this,"onCommunicationDeviceChanged, Device type : "
+                        + device.getInternalType());
+                if (device.getInternalType() == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                    setSystemSystemSpeakerInCallVolume();
+                }
+            }
+     }
+
+    private void setSystemSystemSpeakerInCallVolume() {
+        int ringVolumeLevel = mAudioManager.getStreamVolume(AudioManager.STREAM_RING);
+        if (ringVolumeLevel > 0) {
+            Log.i(this, "Start play CRS with volume :: " + ringVolumeLevel);
+            // Set the CRS volume with local ring volume  and save the old volume setting.
+            mSavedSpeakerInCallVolume = mAudioManager.getStreamVolume(
+                    AudioManager.STREAM_VOICE_CALL);
+            Log.i(this, "mSavedSpeakerInCallVolume is :: " + mSavedSpeakerInCallVolume);
+            mAudioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL,
+                    convertVolumeLevelFromRingToCrs(ringVolumeLevel), 0);
+        }
+    }
+
+    public void restoreSystemSpeakerInCallVolume() {
+        boolean speakerOn = mAudioManager.isSpeakerphoneOn();
+        Log.i(this, "restoreSystemSpeakerInCallVolume :: speaker ON =  " + speakerOn
+                + ", mSavedSpeakerInCallVolume = " + mSavedSpeakerInCallVolume);
+        muteCrs(false);
+        if (speakerOn && (mSavedSpeakerInCallVolume != -1)) {
+            // Restore inCall volume after getting ACTIVE/DISCONNECTED state as
+            // CRS volume used the system ringing volume level.
+            // And set volume level for speaker only.
+            mAudioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL,
+                    mSavedSpeakerInCallVolume, 0);
+            mSavedSpeakerInCallVolume = -1;
+            Log.i(this, "restoreSystemSpeakerInCallVolume done");
+        }
+    }
+
+    private int convertVolumeLevelFromRingToCrs(int ringVolume) {
+        // CRS volume is same as voice call volume per design and telephony should
+        // adjust voice volume according to ring volume when playing CRS audio,
+        // however the range of local ring volume and voice call volume are different
+        // for different devices, telephony needs to align volume level between local
+        // ring and CRS(voice call volume) according to device audio configuration.
+        final int maxVoiceCallVolume = mAudioManager.getStreamMaxVolume(
+                AudioManager.STREAM_VOICE_CALL);
+        final int maxRingVolume = mAudioManager.getStreamMaxVolume(AudioManager.STREAM_RING);
+        final int minVoiceCallVolume = mAudioManager.getStreamMinVolume(
+                AudioManager.STREAM_VOICE_CALL);
+        final int minRingVolume = mAudioManager.getStreamMinVolume(AudioManager.STREAM_RING);
+        if (ringVolume >= maxRingVolume) {
+            return maxVoiceCallVolume;
+        }
+        final float ratio =(float) (maxVoiceCallVolume - minVoiceCallVolume) /
+            (maxRingVolume - minRingVolume);
+        int crsVolume = minVoiceCallVolume + (int)Math.round(ratio * (ringVolume - minRingVolume));
+        if (crsVolume >= maxVoiceCallVolume) {
+            crsVolume = maxVoiceCallVolume;
+        }
+        Log.i(this, "maxVoiceCallVol=%d, maxRingVol=%d, minVoiceCallVol=%d, "
+                + "minRingVol=%d, crsVolume=%d, ",
+                maxVoiceCallVolume,
+                maxRingVolume,
+                minVoiceCallVolume,
+                minRingVolume,
+                crsVolume);
+        return crsVolume;
     }
 
     public boolean startRinging(Call foregroundCall, boolean isHfpDeviceAttached) {
@@ -510,6 +726,43 @@ public class Ringer {
         }
     }
 
+    public void muteCrs(boolean mute) {
+        Log.i(this, "Mute CRS : " + mute);
+        mAudioManager.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL,
+                mute ? AudioManager.ADJUST_MUTE : AudioManager.ADJUST_UNMUTE, 0);
+    }
+
+    public void stopPlayingCrs() {
+        if (mRingingCall != null) {
+            Log.addEvent(mRingingCall, LogUtils.Events.STOP_RINGER);
+            mRingingCall = null;
+        }
+
+        if (mCommunicationDeviceChangedListener != null) {
+            try {
+                mAudioManager.removeOnCommunicationDeviceChangedListener(
+                        mCommunicationDeviceChangedListener);
+            } catch (Exception e) {
+                Log.i(this, "removeOnCommunicationDeviceChangedListener failed with exception: "
+                         + e);
+            }
+            mCommunicationDeviceChangedListener = null;
+
+        }
+        // If we haven't started vibrating because we were waiting for the haptics info, cancel
+        // it and don't vibrate at all.
+        if (mVibrateFuture != null) {
+            mVibrateFuture.cancel(true);
+        }
+
+        if (mIsVibrating) {
+            Log.addEvent(mVibratingCall, LogUtils.Events.STOP_VIBRATOR);
+            mVibrator.cancel();
+            mIsVibrating = false;
+            mVibratingCall = null;
+        }
+    }
+
     public void stopRinging() {
         synchronized (mLock) {
             if (mRingingCall != null) {
@@ -576,10 +829,35 @@ public class Ringer {
         AudioManager audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         // Use AudioManager#getRingerMode for more accurate result, instead of
         // AudioManager#getRingerModeInternal which only useful for volume controllers
+        NotificationManager notificationManager = context.getSystemService(
+                NotificationManager.class);
+        boolean zenModeOn = notificationManager != null
+                && notificationManager.getZenMode() != ZEN_MODE_OFF;
         return mVibrator.hasVibrator()
                 && mSystemSettingsUtil.isRingVibrationEnabled(context)
                 && (audioManager.getRingerMode() != AudioManager.RINGER_MODE_SILENT
-                || shouldRingForContact);
+                || (zenModeOn && shouldRingForContact));
+    }
+
+    public void startVibratingForOutgoingCallActive() {
+        if (!mIsVibrating
+                && Settings.Global.getInt(mContext.getContentResolver(),
+                        Settings.Global.VIBRATING_FOR_OUTGOING_CALL_ACCEPTED, 1) == 1) {
+            mIsVibrating = true;
+            java.util.concurrent.Executors.defaultThreadFactory().newThread(() -> {
+                final VibrationEffect vibrationEffect =
+                        mVibrationEffectProxy.createWaveform(SIMPLE_VIBRATION_PATTERN,
+                        SIMPLE_VIBRATION_AMPLITUDE, REPEAT_SIMPLE_VIBRATION_AT);
+                final AudioAttributes vibrationAttributes = new AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .build();
+                mVibrator.vibrate(vibrationEffect, vibrationAttributes);
+                android.os.SystemClock.sleep(OUTGOING_CALL_VIBRATING_DURATION);
+                mVibrator.cancel();
+                mIsVibrating = false;
+            }).start();
+        }
     }
 
     private RingerAttributes getRingerAttributes(Call call, boolean isHfpDeviceAttached) {

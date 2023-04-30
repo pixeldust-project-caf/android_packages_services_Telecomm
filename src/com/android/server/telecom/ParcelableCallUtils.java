@@ -158,10 +158,7 @@ public class ParcelableCallUtils {
             properties |= android.telecom.Call.Details.PROPERTY_VOIP_AUDIO_MODE;
         }
 
-        // If this is a single-SIM device, the "default SIM" will always be the only SIM.
-        boolean isDefaultSmsAccount = phoneAccountRegistrar != null &&
-                phoneAccountRegistrar.isUserSelectedSmsPhoneAccount(call.getTargetPhoneAccount());
-        if (call.isRespondViaSmsCapable() && isDefaultSmsAccount) {
+        if (call.isRespondViaSmsCapable()) {
             capabilities |= android.telecom.Call.Details.CAPABILITY_RESPOND_VIA_TEXT;
         }
 
@@ -513,7 +510,6 @@ public class ParcelableCallUtils {
 
         Connection.CAPABILITY_REMOTE_PARTY_SUPPORTS_RTT,
         android.telecom.Call.Details.CAPABILITY_REMOTE_PARTY_SUPPORTS_RTT
-
     };
 
     private static int convertConnectionToCallCapabilities(int connectionCapabilities) {
